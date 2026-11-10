@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>ChefBot</AssemblyName>
+    <RootNamespace>ChefBot</RootNamespace>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <DebugType>portable</DebugType>
+    <GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\PlateUp\PlateUp</GameDir>
+    <Managed>$(GameDir)\PlateUp_Data\Managed</Managed>
+    <ModOut>$(GameDir)\Mods\ChefBot</ModOut>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>CS0649;CS0169;CS0414;CS8981</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(Managed)\Kitchen*.dll" Private="false" />
+    <Reference Include="$(Managed)\Controllers.dll" Private="false" />
+    <Reference Include="$(Managed)\Unity.*.dll" Private="false" Exclude="$(Managed)\Unity.InputSystem.ForUI.dll;$(Managed)\Unity.InputSystem.RebindingUI.dll;$(Managed)\Unity.Properties.UI.dll" />
+    <Reference Include="$(Managed)\UnityEngine*.dll" Private="false" />
+    <Reference Include="$(Managed)\MessagePack*.dll" Private="false" />
+    <Reference Include="$(Managed)\Utility.dll" Private="false" />
+    <Reference Include="$(Managed)\HueyCore.dll" Private="false" />
+    <Reference Include="$(Managed)\Sirenix*.dll" Private="false" />
+  </ItemGroup>
+  <Target Name="CopyToMods" AfterTargets="Build">
+    <MakeDir Directories="$(ModOut)" />
+    <Copy SourceFiles="$(OutputPath)ChefBot.dll;$(OutputPath)ChefBot.pdb" DestinationFolder="$(ModOut)" ContinueOnError="true" />
+  </Target>
+</Project>
