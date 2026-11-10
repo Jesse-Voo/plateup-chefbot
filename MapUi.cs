@@ -5,6 +5,7 @@ using UnityEngine;
 
 namespace ChefBot
 {
+    public class ItemOption { public int Item; public string Name; public bool Feasible; public string Note; }
     public class AddCand { public int Item; public List<int> Extras = new List<int>(); public string Label; }
     public struct MapCell { public Vector2Int C; public string Name; public string Kind; public string Held; }
 
@@ -20,12 +21,15 @@ namespace ChefBot
         public static List<AddCand> AddCandidates = new List<AddCand>();
         public static List<KeyValuePair<int, string>> ToppingChoices = new List<KeyValuePair<int, string>>();
         public static int SelectedEntry = -1;
+        public static List<ItemOption> SearchResults = new List<ItemOption>();
+        public static int SelectedBot = -1;      // whose recipe list the panel edits (-1 = shared list)
     }
 
     /// <summary>Top-down kitchen map: click counters to mark them, pick what to stock, choose toppings. F1 opens/closes.</summary>
     public class ChefBotMapUi : MonoBehaviour
     {
         Vector2 prodScroll, listScroll, addScroll, panelScroll;
+        string searchText = "";
         bool wasOpen;
         bool cursorWasVisible; CursorLockMode lockWas;
         GUIStyle small, bold, tipStyle, btn;
@@ -194,15 +198,24 @@ namespace ChefBot
                 var ag = sys.Agents[i];
                 GUILayout.BeginHorizontal();
                 GUILayout.Label((i + 1) + ".", small, GUILayout.Width(16));
+                string typed = GUILayout.TextField(ag.Spec.Name ?? "", 18, GUILayout.Width(140));
+                if (typed != (ag.Spec.Name ?? "")) sys.UiRename(i, typed);
+                bool editing = MapData.SelectedBot == i;
+                if (GUILayout.Toggle(editing, "Recipes", btn, GUILayout.Width(68)) && !editing) sys.UiSelectList(i);
+                if (GUILayout.Button("x", GUILayout.Width(22))) { sys.UiRemoveBot(i); GUILayout.EndHorizontal(); break; }
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(18);
                 foreach (var r in new[] { BotRole.Cook, BotRole.Server, BotRole.Dishwasher, BotRole.All })
                 {
                     bool on = ag.Role == r;
                     string lbl = r == BotRole.Cook ? "Cook" : r == BotRole.Server ? "Serve" : r == BotRole.Dishwasher ? "Wash" : "All";
                     if (GUILayout.Toggle(on, lbl, btn, GUILayout.Width(58)) && !on) sys.UiSetRole(i, r);
                 }
-                if (GUILayout.Button("x", GUILayout.Width(22))) { sys.UiRemoveBot(i); GUILayout.EndHorizontal(); break; }
+                string kl = ag.Spec.Knife == 2 ? "Knife: HIGH" : ag.Spec.Knife == 0 ? "Knife: off" : "Knife: normal";
+                if (GUILayout.Button(kl, btn, GUILayout.Width(100))) sys.UiCycleKnife(i);
                 GUILayout.EndHorizontal();
-                if (!string.IsNullOrEmpty(ag.Status)) GUILayout.Label("     " + ag.Status, small);
+                GUILayout.Label("     " + ag.DisplayName + (string.IsNullOrEmpty(ag.Status) ? "" : ": " + ag.Status), small);
             }
             GUILayout.BeginHorizontal();
             GUILayout.Label("Add:", small, GUILayout.Width(30));
@@ -224,11 +237,20 @@ namespace ChefBot
 
             GUILayout.Space(8);
             GUILayout.Label("What to keep stocked (top = first)", bold);
-            if (cfg.Make.Count == 0) GUILayout.Label("Empty = the bot decides by itself. Add something to take control.", small);
-            listScroll = GUILayout.BeginScrollView(listScroll, GUILayout.Height(140));
-            for (int i = 0; i < cfg.Make.Count; i++)
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("List of:", small, GUILayout.Width(44));
+            if (GUILayout.Toggle(MapData.SelectedBot == -1, "Everyone", btn, GUILayout.Width(70)) && MapData.SelectedBot != -1) sys.UiSelectList(-1);
+            for (int bi = 0; bi < sys.Agents.Count; bi++)
             {
-                var m = cfg.Make[i];
+                string bn = sys.Agents[bi].DisplayName; if (bn.Length > 8) bn = bn.Substring(0, 8);
+                if (GUILayout.Toggle(MapData.SelectedBot == bi, bn, btn, GUILayout.Width(66)) && MapData.SelectedBot != bi) sys.UiSelectList(bi);
+            }
+            GUILayout.EndHorizontal();
+            if (sys.EditList.Count == 0) GUILayout.Label(MapData.SelectedBot >= 0 ? "Empty = this bot uses the shared list (Everyone)." : "Empty = the bots decide by themselves. Add something to take control.", small);
+            listScroll = GUILayout.BeginScrollView(listScroll, GUILayout.Height(140));
+            for (int i = 0; i < sys.EditList.Count; i++)
+            {
+                var m = sys.EditList[i];
                 GUILayout.BeginHorizontal();
                 bool selected = MapData.SelectedEntry == i;
                 if (GUILayout.Toggle(selected, " " + (i + 1) + ". " + m.ItemName + (m.ExtraNames.Count > 0 ? " +" + string.Join("+", m.ExtraNames) : ""), btn, GUILayout.Width(170)) && !selected) sys.UiSelectEntry(i);
@@ -242,9 +264,9 @@ namespace ChefBot
             }
             GUILayout.EndScrollView();
 
-            if (MapData.SelectedEntry >= 0 && MapData.SelectedEntry < cfg.Make.Count)
+            if (MapData.SelectedEntry >= 0 && MapData.SelectedEntry < sys.EditList.Count)
             {
-                var m = cfg.Make[MapData.SelectedEntry];
+                var m = sys.EditList[MapData.SelectedEntry];
                 GUILayout.Label("Toppings for the selected line:", bold);
                 if (MapData.ToppingChoices.Count == 0) GUILayout.Label("(none available for this item in your kitchen yet)", small);
                 foreach (var t in MapData.ToppingChoices)
@@ -260,6 +282,16 @@ namespace ChefBot
             foreach (var c in MapData.AddCandidates)
                 if (GUILayout.Button(c.Label, btn)) sys.UiAdd(c.Item, c.Extras);
             GUILayout.EndScrollView();
+
+            GUILayout.Space(4);
+            GUILayout.Label("Search any item (e.g. corn):", bold);
+            string typedSearch = GUILayout.TextField(searchText, 24);
+            if (typedSearch != searchText) { searchText = typedSearch; sys.UiSearch(searchText); }
+            foreach (var m in MapData.SearchResults)
+            {
+                string label = m.Name + (m.Feasible ? "" : "   (" + m.Note + ")");
+                if (GUILayout.Button(label, btn)) sys.UiAdd(m.Item, null);
+            }
 
             if (!string.IsNullOrEmpty(sys.Status)) GUILayout.Label(sys.Status, small);
             GUILayout.EndScrollView();

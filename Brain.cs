@@ -182,12 +182,31 @@ namespace ChefBot
                     int srcId = n.Child.Item;
                     var near = NodePositions(n.Child);
                     var centre = near.Count > 0 ? new Vector3(near.Average(v => v.x), 0, near.Average(v => v.z)) : MyPos;
-                    var ws = FindWorkstation(srcId, out bool auto, out int proc, requireFree: true, near: centre);
-                    if (ws == null) { Log("no free workstation for processing " + Dump.Name(srcId)); yield break; }
+                    // is there a suitable workstation at all? (it may be busy with another bot right now - that is fine)
+                    var wsAny = FindWorkstation(srcId, out bool auto, out int proc, requireFree: false, near: centre);
+                    if (wsAny == null) { Log("no workstation for processing " + Dump.Name(srcId)); yield break; }
+                    // build the input first, so a second cook can assemble while the first one's food is in the only oven
+                    foreach (var _ in ExecHand(n.Child, depth + 1)) yield return 0;
+                    if (!R) yield break;
+                    // now wait for a free one
+                    Appl ws = null;
+                    float waitStart = Now, lastLook = -10f;
+                    while (true)
+                    {
+                        if (Now - lastLook > 0.4f)
+                        {
+                            lastLook = Now;
+                            Snapshot();
+                            ws = FindWorkstation(srcId, out auto, out proc, requireFree: true, near: MyPos);
+                            if (ws != null) break;
+                        }
+                        if (Now - waitStart > 180f) break;
+                        Status = "Waiting for the " + wsAny.Name;
+                        yield return 0;
+                    }
+                    if (ws == null) { Log("no free " + wsAny.Name + " after waiting"); R = false; yield break; }
                     var wsE = ws.E;
                     Reserved.Add(wsE);
-                    foreach (var _ in ExecHand(n.Child, depth + 1)) yield return 0;
-                    if (!R) { Reserved.Remove(wsE); yield break; }
                     foreach (var _ in PutOn(wsE)) yield return 0;
                     if (!R)
                     {
@@ -278,6 +297,54 @@ namespace ChefBot
                     yield break;
                 }
 
+                case NK.Depleted:
+                {
+                    // e.g. corn on the cob: put the raw cob on a counter, hold act until the husk comes off, take the husk
+                    // away (bin) and what is left on the counter is the husked cob.
+                    foreach (var _ in ExecHand(n.Child, depth + 1)) yield return 0;
+                    if (!R) yield break;
+                    Snapshot();
+                    var dpts = NodePositions(n); dpts.Add(MyPos);
+                    var dspot = BestStash(dpts);
+                    if (dspot == Entity.Null) { Log("no free counter for " + Dump.Name(n.Child.Item)); R = false; yield break; }
+                    Reserved.Add(dspot);
+                    foreach (var _ in PutOn(dspot)) yield return 0;
+                    if (!R) { Log("husking: could not put " + Dump.Name(n.Child.Item) + " on the counter"); Reserved.Remove(dspot); yield break; }
+                    Log("husking: " + Dump.DescribeItem(EntityManager, HeldBy(dspot)) + " is on the counter, holding act");
+                    foreach (var _ in Work(dspot, () => SplitReady(HeldBy(dspot)), 25f)) yield return 0;
+                    Log("husking: split ready=" + SplitReady(HeldBy(dspot)) + ", counter has " + Dump.DescribeItem(EntityManager, HeldBy(dspot)));
+
+                    // take the portion (the husk) into the hand; try twice, the game needs a moment after the split completes
+                    for (int tryTake = 0; tryTake < 2 && MyHeld() == Entity.Null; tryTake++)
+                    {
+                        if (tryTake > 0) foreach (var _ in Pause(0.5f)) yield return 0;
+                        foreach (var _ in Grab(dspot)) yield return 0;
+                    }
+                    var portion = MyHeld();
+                    int portionId = ItemId(portion);
+                    Log("husking: took " + (portion != Entity.Null ? Dump.DescribeItem(EntityManager, portion) : "nothing") + "; counter now has " + Dump.DescribeItem(EntityManager, HeldBy(dspot)));
+
+                    if (portion != Entity.Null && portionId == n.Item)
+                    {
+                        // we ended up holding the husked cob itself: that is what we wanted
+                        Reserved.Remove(dspot);
+                        R = true;
+                        yield break;
+                    }
+                    if (portion != Entity.Null)
+                    {
+                        // the husk (or whatever came off): throw it away
+                        foreach (var _ in DropJunk()) yield return 0;
+                        Log("husking: after throwing away, hand=" + (MyHeld() != Entity.Null ? Dump.DescribeItem(EntityManager, MyHeld()) : "empty"));
+                        if (MyHeld() != Entity.Null) { Status = "Cannot get rid of " + Dump.Name(ItemId(MyHeld())); Reserved.Remove(dspot); R = false; yield break; }
+                    }
+                    int leftOver = HeldIdOf(dspot);
+                    if (leftOver != n.Item) { Log("husking: expected " + Dump.Name(n.Item) + " on the counter but found " + (leftOver != 0 ? Dump.Name(leftOver) : "nothing")); Reserved.Remove(dspot); R = false; yield break; }
+                    foreach (var _ in TakeFrom(dspot, n.Item)) yield return 0;
+                    Reserved.Remove(dspot);
+                    yield break;
+                }
+
                 default:
                     Log("unsupported node " + n.Kind);
                     R = false;
@@ -289,6 +356,13 @@ namespace ChefBot
         {
             FindWorkstation(src, out bool auto, out _);
             return auto;
+        }
+
+        bool SplitReady(Entity item)
+        {
+            if (item == Entity.Null || !EntityManager.Exists(item) || !EntityManager.HasComponent<CItemUndergoingProcess>(item)) return false;
+            var p = EntityManager.GetComponentData<CItemUndergoingProcess>(item);
+            return p.IsBeingSplit && p.Progress >= 1f;
         }
 
         /// <summary>Make sure the bulk item a slice comes from is lying on some holder (builds + stashes it if not).</summary>
@@ -486,7 +560,7 @@ namespace ChefBot
 
         float lastPrepLog;
 
-        IEnumerable<int> DoWash(Entity source, bool alreadyHolding)
+        IEnumerable<int> DoWash(Entity source, bool alreadyHolding, bool allowRack = false)
         {
             Snapshot();
             if (!alreadyHolding)
@@ -495,6 +569,19 @@ namespace ChefBot
                 if (!R) yield break;
             }
             int dirty = ItemId(MyHeld());
+            if (allowRack)
+            {
+                // dirty plates go into a rack / soaking sink first (if there is one with room)
+                var rack = FindRackFor();
+                if (rack != null)
+                {
+                    foreach (var _ in PutOn(rack.E)) yield return 0;
+                    if (R) { Status = "Plate put in the " + rack.Name; yield break; }
+                    rackBadUntil[rack.E] = Now + 120f;
+                    Log(cur?.Name + ": the " + rack.Name + " would not take the plate, washing it directly");
+                    if (MyHeld() == Entity.Null) yield break;
+                }
+            }
             Appl sink = null; float bd = 1e9f; bool auto = false;
             foreach (var a in Appls)
             {
@@ -557,7 +644,7 @@ namespace ChefBot
             bool doWashJob = role == BotRole.Dishwasher || role == BotRole.All;
             Log(cur.Name + " started; pos=" + MyPos.ToString("F2") + " tiles=" + nav.TileCount);
             BuildIndexes();
-            float lastIdleLog = 0, lastPrepCheck = 0;
+            float lastIdleLog = 0, lastPrepCheck = 0, lastBinCheck = 0, lastMopCheck = 0;
             while (true)
             {
                 Snapshot();
@@ -568,6 +655,22 @@ namespace ChefBot
                     Log(cur.Name + " holding " + Dump.DescribeItem(EntityManager, MyHeld()) + " -> dropping");
                     foreach (var _ in DropHeld()) yield return 0;
                     if (MyHeld() != Entity.Null) foreach (var _ in Pause(2f)) yield return 0;
+                    continue;
+                }
+
+                // safety net: never wander around with a tray equipped unless a tray round is running
+                if (HoldsTray())
+                {
+                    foreach (var _ in ReleaseTray()) yield return 0;
+                    if (HoldsTray()) foreach (var _ in Pause(2f)) yield return 0;
+                    continue;
+                }
+
+                // a mop in the tool slot means no carrying: put it down when there is plate work (or this bot does not mop)
+                if (HoldsMop() && (!(doWashJob && role == BotRole.Dishwasher) || !cfg.MopFloors || PlateWorkPending()))
+                {
+                    foreach (var _ in ReleaseMop()) yield return 0;
+                    if (HoldsMop()) foreach (var _ in Pause(2f)) yield return 0;
                     continue;
                 }
 
@@ -596,16 +699,93 @@ namespace ChefBot
                 // dirty dishes
                 if (doWashJob)
                 {
+                    // 1) plates that finished cleaning in a rack / soak sink
+                    var fin = FindFinishedClean();
+                    if (fin != Entity.Null && !ClaimedByOther("clean:" + fin.Index))
+                    {
+                        string ck = "clean:" + fin.Index;
+                        Claim(ck);
+                        Status = "Collecting clean plates";
+                        try
+                        {
+                            foreach (var _ in TakeFrom(fin, 0)) yield return 0;
+                            if (R) foreach (var _ in DropHeld(preferProvider: true)) yield return 0;
+                        }
+                        finally { Release(ck); }
+                        continue;
+                    }
+
+                    // 1b) two or more dirty plates and a tray stand: carry two per trip
+                    if (cfg.UseTray && Now > trayDisabledUntil && MyHeld() == Entity.Null && CurrentTool() == Entity.Null)
+                    {
+                        Snapshot();
+                        if (FindTrayStand() != null && DirtyPlateCount() >= 2 && RackRoomTotal() >= 2)
+                        {
+                            Status = "Carrying dirty plates on a tray";
+                            foreach (var _ in DoTrayRound()) yield return 0;
+                            continue;
+                        }
+                    }
+
+                    // 2) dirty plates from tables etc. go to a rack first; 3) only then wash what is waiting in the racks
                     int dirtyId;
-                    var dirty = FindDirty(out dirtyId);
+                    var dirty = FindDirty(out dirtyId, includeRacks: false);
+                    bool fromRack = false;
+                    if (dirty == Entity.Null) { dirty = FindDirty(out dirtyId, includeRacks: true); fromRack = dirty != Entity.Null; }
                     if (dirty != Entity.Null && !ClaimedByOther("wash:" + dirty.Index))
                     {
                         string wkey = "wash:" + dirty.Index;
                         Claim(wkey);
-                        Status = "Washing dishes";
-                        try { foreach (var _ in DoWash(dirty, false)) yield return 0; }
+                        Status = fromRack ? "Washing plates from the rack" : "Collecting dirty plates";
+                        try { foreach (var _ in DoWash(dirty, false, allowRack: !fromRack)) yield return 0; }
                         finally { Release(wkey); }
                         if (!R) foreach (var _ in Pause(2f)) yield return 0;
+                        continue;
+                    }
+                }
+
+                // an idle dishwasher mops the floors
+                if (role == BotRole.Dishwasher && cfg.MopFloors && Now > mopDisabledUntil && MyHeld() == Entity.Null && Now - lastMopCheck > 1.5f)
+                {
+                    lastMopCheck = Now;
+                    Snapshot();
+                    if (!PlateWorkPending())
+                    {
+                        var mess = FindMess();
+                        if (mess != Entity.Null && (HoldsMop() || (CurrentTool() == Entity.Null && FindMopStand() != null)))
+                        {
+                            Status = "Mopping the floor";
+                            foreach (var _ in DoMop(mess)) yield return 0;
+                            continue;
+                        }
+                    }
+                }
+
+                // a full bin cannot take rubbish: empty it (the bag goes to the outside bin)
+                if ((doCook || doWashJob) && cfg.EmptyBins && MyHeld() == Entity.Null && CurrentTool() == Entity.Null && Now - lastBinCheck > 3f)
+                {
+                    lastBinCheck = Now;
+                    Snapshot();
+                    var fb = FindFullBin();
+                    if (fb != null && !ClaimedByOther("bin:" + fb.E.Index))
+                    {
+                        string bk = "bin:" + fb.E.Index;
+                        Claim(bk);
+                        Status = "Emptying the bin";
+                        try { foreach (var _ in EmptyBin(fb.E)) yield return 0; }
+                        finally { Release(bk); }
+                        continue;
+                    }
+                }
+
+                // cooks pick up the sharp knife (chopping x3) from its provider, once per day
+                if (doCook && cfg.UseKnife && Now > knifeDisabledUntil && CurrentTool() == Entity.Null && MyHeld() == Entity.Null && MayTakeKnife())
+                {
+                    Snapshot();
+                    if (FindKnifeStand() != null)
+                    {
+                        Status = "Picking up the sharp knife";
+                        foreach (var _ in EnsureKnife()) yield return 0;
                         continue;
                     }
                 }
@@ -618,7 +798,7 @@ namespace ChefBot
                     if (R) { lastPrepCheck = 0; continue; }
                 }
 
-                if (!doCook) Status = doServe ? "Waiting for orders" : "Waiting for dirty plates";
+                if (!doCook) Status = doServe ? "Waiting for orders" : (doWashJob && LastDirtyOutOfReach > 0 ? LastDirtyOutOfReach + " place(s) with dirty plates are out of reach" : "Waiting for dirty plates");
                 if (Now - lastIdleLog > 20f) { lastIdleLog = Now; Log(cur.Name + " idle - " + Status); }
                 foreach (var _ in Pause(0.5f)) yield return 0;
             }

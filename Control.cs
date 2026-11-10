@@ -16,6 +16,8 @@ namespace ChefBot
     {
         ChefConfig cfg = new ChefConfig();
         public ChefConfig Cfg => cfg;
+        /// <summary>The stock list the map window is editing: one bot's own recipes, or the shared list.</summary>
+        public List<MakeEntry> EditList { get { return (MapData.SelectedBot >= 0 && MapData.SelectedBot < agents.Count) ? agents[MapData.SelectedBot].Spec.Make : cfg.Make; } }
         public int MarkIndex => markIndex;
         float mapAt;
         bool cfgLoaded;
@@ -39,7 +41,7 @@ namespace ChefBot
             cfg = ChefConfig.Load(allItems);
             BuildAgentsFromConfig();
             cfgLoaded = true;
-            Log($"config loaded from {ChefConfig.FilePath}: {cfg.Make.Count} make lines, {cfg.AllOutputCells.Count()} output cells, {cfg.Stash.Count} stash cells");
+            Log($"config loaded from {ChefConfig.FilePath}: {cfg.Make.Count} shared make lines, {cfg.Bots.Count} bot(s), {cfg.AllOutputCells.Count()} output cells, {cfg.Stash.Count} stash cells");
             foreach (var p in cfg.Problems) Log("config problem: " + p);
         }
 
@@ -48,7 +50,7 @@ namespace ChefBot
         List<string> MarkTargets()
         {
             var l = new List<string> { "*" };
-            foreach (var m in cfg.Make) if (!l.Contains(m.ItemName)) l.Add(m.ItemName);
+            foreach (var m in cfg.Make.Concat(agents.SelectMany(ag2 => ag2.Spec.Make))) if (!l.Contains(m.ItemName)) l.Add(m.ItemName);
             try
             {
                 Snapshot();
@@ -137,7 +139,7 @@ namespace ChefBot
 
         void RefreshMapData()
         {
-            nav.Rebuild(Tiles, p => TileManager.GetOccupant(p) != Entity.Null);
+            nav.Rebuild(Tiles, p => IsBlockingOccupant(p));
             Snapshot();
             var cells = new List<MapCell>();
             foreach (var a in Appls)
@@ -169,6 +171,7 @@ namespace ChefBot
                 for (int i = 0; i < ps.Length; i++) if (!IsBotUser(ps[i].ID)) humans.Add(pos[i].Position);
             MapData.Humans = humans;
 
+            if (MapData.SelectedBot >= agents.Count) MapData.SelectedBot = -1;
             MapData.Products = MarkTargets();
             if (markIndex >= MapData.Products.Count) markIndex = 0;
 
@@ -178,19 +181,26 @@ namespace ChefBot
                 foreach (var t in PrepTargets(mi, all: true))
                 {
                     var ex = t.extras ?? new List<int>();
-                    bool dup = cfg.Make.Any(m => m.Item == t.item && m.Extras.Count == ex.Count && !m.Extras.Except(ex).Any())
+                    bool dup = EditList.Any(m => m.Item == t.item && m.Extras.Count == ex.Count && !m.Extras.Except(ex).Any())
                                || cand.Any(c => c.Item == t.item && c.Extras.Count == ex.Count && !c.Extras.Except(ex).Any());
                     if (dup) continue;
                     cand.Add(new AddCand { Item = t.item, Extras = ex, Label = RawName(t.item) + (ex.Count > 0 ? "  +  " + string.Join(", ", ex.Select(RawName)) : "") });
                 }
+            // side dishes on the menu (corn on the cob ...) - listed even when something is still missing in the kitchen
+            foreach (int side in SideItems())
+            {
+                if (EditList.Any(m => m.Item == side) || cand.Any(c => c.Item == side)) continue;
+                bool ok = Plan(side, new HashSet<int>(), 0, noLoose: true) != null;
+                cand.Add(new AddCand { Item = side, Extras = new List<int>(), Label = RawName(side) + (ok ? "  (side dish)" : "  (side dish - needs more in the kitchen)") });
+            }
             MapData.AddCandidates = cand;
 
             // toppings for the selected line
             var tops = new List<KeyValuePair<int, string>>();
-            if (MapData.SelectedEntry >= 0 && MapData.SelectedEntry < cfg.Make.Count)
+            if (MapData.SelectedEntry >= 0 && MapData.SelectedEntry < EditList.Count)
             {
                 banToppings.Clear();
-                var canon = Plan(cfg.Make[MapData.SelectedEntry].Item, new HashSet<int>(), 0, noLoose: true);
+                var canon = Plan(EditList[MapData.SelectedEntry].Item, new HashSet<int>(), 0, noLoose: true);
                 if (canon != null)
                 {
                     var seen = new HashSet<int>();
@@ -235,38 +245,61 @@ namespace ChefBot
         }
 
         public void UiSetProduct(int i) { markIndex = i; }
+
+        /// <summary>Find items by name (any item in the game) and say whether this kitchen can make them.</summary>
+        public void UiSearch(string text)
+        {
+            uiQueue.Enqueue(() =>
+            {
+                var res = new List<ItemOption>();
+                text = (text ?? "").Trim();
+                if (text.Length >= 2 && GameData.Main != null && HasSingleton<SLayout>())
+                {
+                    BuildIndexes();
+                    Snapshot();
+                    banToppings.Clear();
+                    foreach (var it in allItems.Where(i => i.name.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0).OrderBy(i => i.name).Take(14))
+                    {
+                        bool ok = Plan(it.ID, new HashSet<int>(), 0, noLoose: true) != null;
+                        string note = ok ? "" : (it.DedicatedProvider != null ? "needs a " + it.DedicatedProvider.name : "cannot be made in this kitchen yet");
+                        res.Add(new ItemOption { Item = it.ID, Name = it.name, Feasible = ok, Note = note });
+                    }
+                }
+                MapData.SearchResults = res;
+            });
+        }
         public void UiClearMarks() { cfg.Outputs.Clear(); cfg.Stash.Clear(); cfg.Save(); Status = "All counter marks cleared"; }
         public void UiToggleFallback() { cfg.OutputFallback = !cfg.OutputFallback; cfg.Save(); }
         public void UiSelectEntry(int i) { MapData.SelectedEntry = i; mapAt = 0; }
-        public void UiCount(int i, int d) { if (i < 0 || i >= cfg.Make.Count) return; cfg.Make[i].Count = Mathf.Clamp(cfg.Make[i].Count + d, 1, 20); cfg.Save(); }
+        public void UiCount(int i, int d) { if (i < 0 || i >= EditList.Count) return; EditList[i].Count = Mathf.Clamp(EditList[i].Count + d, 1, 20); cfg.Save(); }
         public void UiMove(int i, int d)
         {
             int j = i + d;
-            if (i < 0 || j < 0 || i >= cfg.Make.Count || j >= cfg.Make.Count) return;
-            var t = cfg.Make[i]; cfg.Make[i] = cfg.Make[j]; cfg.Make[j] = t;
+            if (i < 0 || j < 0 || i >= EditList.Count || j >= EditList.Count) return;
+            var t = EditList[i]; EditList[i] = EditList[j]; EditList[j] = t;
             if (MapData.SelectedEntry == i) MapData.SelectedEntry = j; else if (MapData.SelectedEntry == j) MapData.SelectedEntry = i;
             cfg.Save();
         }
         public void UiRemove(int i)
         {
-            if (i < 0 || i >= cfg.Make.Count) return;
-            cfg.Make.RemoveAt(i);
-            if (MapData.SelectedEntry >= cfg.Make.Count) MapData.SelectedEntry = -1;
+            if (i < 0 || i >= EditList.Count) return;
+            EditList.RemoveAt(i);
+            if (MapData.SelectedEntry >= EditList.Count) MapData.SelectedEntry = -1;
             cfg.Save(); mapAt = 0;
         }
         public void UiAdd(int itemId, List<int> extras)
         {
             var me = new MakeEntry { Item = itemId, ItemName = RawName(itemId), Count = (extras != null && extras.Count > 0) ? 1 : 2, Raw = RawName(itemId) };
             if (extras != null) foreach (int x in extras) { me.Extras.Add(x); me.ExtraNames.Add(RawName(x)); }
-            cfg.Make.Add(me);
-            MapData.SelectedEntry = cfg.Make.Count - 1;
+            EditList.Add(me);
+            MapData.SelectedEntry = EditList.Count - 1;
             cfg.Save(); mapAt = 0;
             Status = "Added " + RawName(itemId) + " - the bot now follows your list";
         }
         public void UiToggleTopping(int entry, int toppingId)
         {
-            if (entry < 0 || entry >= cfg.Make.Count) return;
-            var m = cfg.Make[entry];
+            if (entry < 0 || entry >= EditList.Count) return;
+            var m = EditList[entry];
             int idx = m.Extras.IndexOf(toppingId);
             if (idx >= 0) { m.Extras.RemoveAt(idx); m.ExtraNames.RemoveAt(idx); }
             else { m.Extras.Add(toppingId); m.ExtraNames.Add(RawName(toppingId)); }
@@ -359,10 +392,21 @@ namespace ChefBot
 
         List<PrepEntry> BuildPrepList()
         {
+            var list = BuildPrepListBase();
+            if (cfg.MakeSides)
+                foreach (int side in SideItems())
+                    if (!list.Any(x => x.Item == side) && Plan(side, new HashSet<int>(), 0, noLoose: true) != null)
+                        list.Add(new PrepEntry { Item = side, Want = 2, Why = "side dish", Name = RawName(side) });
+            return list;
+        }
+
+        List<PrepEntry> BuildPrepListBase()
+        {
             var list = new List<PrepEntry>();
-            if (cfg.Make.Count > 0)
+            var mine = (cur != null && cur.Spec.Make.Count > 0) ? cur.Spec.Make : cfg.Make;   // the bot's own recipes, else the shared list
+            if (mine.Count > 0)
             {
-                foreach (var m in cfg.Make) list.Add(new PrepEntry { Item = m.Item, Extras = m.Extras, Want = m.Count, Why = "your list", Name = m.ItemName });
+                foreach (var m in mine) list.Add(new PrepEntry { Item = m.Item, Extras = m.Extras, Want = m.Count, Why = "your list", Name = m.ItemName });
                 return list;
             }
             foreach (int menuItem in MenuItems())
@@ -376,12 +420,13 @@ namespace ChefBot
         {
             R = false;
             Snapshot();
+            bool waitingOnSomething = false;
             foreach (var e in BuildPrepList())
             {
                 int key = e.Item * 31 + e.Extras.Aggregate(7, (h, x) => h * 17 + x);
-                if (failUntil.TryGetValue(key, out float until) && Now < until) continue;
+                if (failUntil.TryGetValue(key, out float until) && Now < until) { waitingOnSomething = true; continue; }
                 string claimKey = "prep:" + key;
-                if (ClaimedByOther(claimKey)) continue;
+                if (ClaimedByOther(claimKey)) { waitingOnSomething = true; continue; }
 
                 // which toppings must NOT be in stock items of this kind (plain pizza must not contain salami ...)
                 banToppings.Clear();
@@ -438,13 +483,13 @@ namespace ChefBot
                     if (spot == Entity.Null) { foreach (var _ in DropHeld()) yield return 0; Reserved.Clear(); yield break; }
                     foreach (var _ in PutOn(spot)) yield return 0;
                     Reserved.Clear();
-                    Log("stocked " + e.Name + " -> " + R);
+                    Log("stocked " + e.Name + (e.Extras.Count > 0 ? " with " + string.Join(", ", e.Extras.Select(RawName)) : "") + " -> " + R);
                     R = true;
                     yield break;
                 }
                 finally { Release(claimKey); }
             }
-            Status = "Idle - everything on your list is stocked";
+            Status = waitingOnSomething ? "Waiting - something is busy, retrying shortly" : "Idle - everything on your list is stocked";
             R = false;
         }
     }

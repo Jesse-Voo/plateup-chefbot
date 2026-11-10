@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace ChefBot
 {
-    public enum NK { Fetch, Pickup, Process, Compose, Split }
+    public enum NK { Fetch, Pickup, Process, Compose, Split, Depleted }
 
     /// <summary>One node of a recipe tree: "how do I get item X".</summary>
     public class Node
@@ -22,6 +22,7 @@ namespace ChefBot
         public int Process;            // Process
         public List<Node> Parts = new List<Node>();   // Compose (Parts[0] is the base/container)
         public int Cost;
+        public int Aux;                // Depleted: the portion item that is taken off (corn husk)
 
         public string Describe(int indent = 0)
         {
@@ -41,7 +42,7 @@ namespace ChefBot
         public Vector3 Pos;
         public string Name;
         public Appliance Def;
-        public bool HasHolder, IsProvider, IsTable, IsBin, IsSink, HasStorage, IsConveyor, NeedsActivation;
+        public bool HasHolder, IsProvider, IsTable, IsBin, IsSink, HasStorage, IsConveyor, NeedsActivation, IsDirtyStack, IsExternalBin;
         public Entity Held;
         public int HeldId;
         public CItemProvider Prov;
@@ -53,6 +54,7 @@ namespace ChefBot
         struct Deriv { public Item Src; public int Process; public bool Bad; public bool Wrap; }
         Dictionary<int, List<Deriv>> madeBy;
         Dictionary<int, List<Item>> splitOf;
+        Dictionary<int, List<Item>> depletedOf;   // item -> the bulk items that turn into it once their single portion is taken (corn -> husked corn)
         HashSet<int> dirtyIds;
         Dictionary<int, List<int>> wrapResults;
         List<Item> allItems;
@@ -62,6 +64,7 @@ namespace ChefBot
             if (madeBy != null) return;
             madeBy = new Dictionary<int, List<Deriv>>();
             splitOf = new Dictionary<int, List<Item>>();
+            depletedOf = new Dictionary<int, List<Item>>();
             dirtyIds = new HashSet<int>();
             wrapResults = new Dictionary<int, List<int>>();
             allItems = Data.Get<Item>().ToList();
@@ -79,6 +82,13 @@ namespace ChefBot
                             if (!wrapResults.TryGetValue(it.ID, out var wl)) wrapResults[it.ID] = wl = new List<int>();
                             wl.Add(p.Result.ID);
                         }
+                    }
+                if (it.SplitSubItem != null && it.SplitCount == 1 && it.SplitDepletedItems != null)
+                    foreach (var dep in it.SplitDepletedItems)
+                    {
+                        if (dep == null || dep.ID == it.SplitSubItem.ID) continue;
+                        if (!depletedOf.TryGetValue(dep.ID, out var dl)) depletedOf[dep.ID] = dl = new List<Item>();
+                        dl.Add(it);
                     }
                 if (it.SplitSubItem != null)
                 {
@@ -106,6 +116,9 @@ namespace ChefBot
                 a.HasHolder = em.HasComponent<CItemHolder>(e);
                 a.IsProvider = em.HasComponent<CItemProvider>(e);
                 if (a.IsProvider) a.Prov = em.GetComponentData<CItemProvider>(e);
+                // the Dirty Plate Stack: a provider (no item holder) that stores dirty dishes
+                a.IsDirtyStack = a.IsProvider && em.HasComponent<CDynamicItemProvider>(e) && (em.GetComponentData<CDynamicItemProvider>(e).StorageFlags & ItemStorage.DirtyDish) != 0;
+                a.IsExternalBin = em.HasComponent<CApplianceExternalBin>(e);
                 a.IsTable = em.HasComponent<CApplianceTable>(e);
                 a.IsBin = em.HasComponent<CApplianceBin>(e);
                 a.IsSink = em.HasComponent<CApplianceSinkBin>(e);
@@ -185,7 +198,7 @@ namespace ChefBot
         public static Node Clone(Node n)
         {
             if (n == null) return null;
-            var c = new Node { Kind = n.Kind, Item = n.Item, Provider = n.Provider, Holder = n.Holder, Process = n.Process, Cost = n.Cost, Child = Clone(n.Child) };
+            var c = new Node { Kind = n.Kind, Item = n.Item, Provider = n.Provider, Holder = n.Holder, Process = n.Process, Cost = n.Cost, Aux = n.Aux, Child = Clone(n.Child) };
             foreach (var p in n.Parts) c.Parts.Add(Clone(p));
             return c;
         }
@@ -291,6 +304,16 @@ namespace ChefBot
                 if (AddExtra(root, w)) { Log("order extra added: " + Dump.Name(w)); inside = Closure(root); }
                 else Log("could not add extra " + Dump.Name(w) + " to " + Dump.Name(o.ItemId));
             }
+            // sides (corn on the cob, onion rings ...) go on the same plate
+            if (o.Sides != null && root.Kind == NK.Compose)
+                foreach (int sid in o.Sides)
+                {
+                    var sn = Plan(sid, new HashSet<int>(), 0);
+                    if (sn == null) { Log("cannot make the side " + Dump.Name(sid) + " in this kitchen"); continue; }
+                    root.Parts.Add(Clone(sn));
+                    root.Cost += sn.Cost;
+                    Log("side added to the order: " + Dump.Name(sid));
+                }
             return root;
         }
 
@@ -418,9 +441,9 @@ namespace ChefBot
             return res;
         }
 
-        public struct Order { public int ItemId; public Vector3 TablePos; public Entity Group; public int ExtraId; public List<int> Comps; public int Key => ItemId * 31 + ExtraId; }
+        public struct Order { public int ItemId; public Vector3 TablePos; public Entity Group; public int ExtraId; public List<int> Comps; public List<int> Sides; public int Key => ItemId * 31 + ExtraId; }
 
-        /// <summary>Unserved orders with the table position they must be served to.</summary>
+        /// <summary>Unserved orders with the table position they must be served to. Side orders are attached to the main at the same seat.</summary>
         public List<Order> PendingOrders()
         {
             var res = new List<Order>();
@@ -430,47 +453,84 @@ namespace ChefBot
                 foreach (var e in ents)
                 {
                     var buf = em.GetBuffer<CDisplayedItem>(e);
+                    var mains = new List<int>(); var sideIdx = new List<int>();
                     for (int i = 0; i < buf.Length; i++)
                     {
                         var d = buf[i];
-                        if (d.IsComplete || d.ItemID == 0 || d.IsSide) continue;
+                        if (d.IsComplete || d.ItemID == 0) continue;
+                        if (d.IsSide) sideIdx.Add(i); else mains.Add(i);
+                    }
+                    var usedSides = new HashSet<int>();
+                    foreach (int mi in mains)
+                    {
+                        var d = buf[mi];
                         var comps = new List<int>();
                         if (d.Item != Entity.Null && em.Exists(d.Item) && em.HasComponent<CItem>(d.Item))
                         {
                             var il = em.GetComponentData<CItem>(d.Item).Items;
                             for (int k = 0; k < il.Count; k++) if (il[k] != 0 && il[k] != d.ItemID) comps.Add(il[k]);
                         }
-                        res.Add(new Order { ItemId = d.ItemID, TablePos = d.TablePosition, Group = e, ExtraId = d.ExtraID, Comps = comps });
+                        var sides = new List<int>();
+                        if (cfg.ServeSides)
+                            foreach (int si in sideIdx)
+                                if (!usedSides.Contains(si) && (buf[si].SeatPosition - d.SeatPosition).magnitude < 0.6f) { sides.Add(buf[si].ItemID); usedSides.Add(si); }
+                        res.Add(new Order { ItemId = d.ItemID, TablePos = d.TablePosition, Group = e, ExtraId = d.ExtraID, Comps = comps, Sides = sides });
                     }
+                    if (cfg.ServeSides)
+                        foreach (int si in sideIdx)
+                            if (!usedSides.Contains(si))
+                                res.Add(new Order { ItemId = buf[si].ItemID, TablePos = buf[si].TablePosition, Group = e, ExtraId = 0, Comps = new List<int>(), Sides = new List<int>() });   // a side on its own
                 }
             return res;
         }
 
-        /// <summary>A holder somewhere holding a dirty dish.</summary>
-        public Entity FindDirty(out int id)
+        public List<int> SideItems()
+        {
+            var res = new List<int>();
+            using (var q = EntityManager.CreateEntityQuery(typeof(CMenuItem)))
+            using (var cs = q.ToComponentDataArray<CMenuItem>(Allocator.TempJob))
+                foreach (var c in cs) if (c.Item != 0 && c.Phase == MenuPhase.Side && !res.Contains(c.Item)) res.Add(c.Item);
+            return res;
+        }
+
+        public int LastDirtyOutOfReach;
+
+        /// <summary>The nearest reachable holder / table / stack that holds a dirty dish.</summary>
+        public Entity FindDirty(out int id, bool includeRacks = true)
         {
             id = 0;
             BuildIndexes();
+            Entity best = Entity.Null; float bd = 1e9f; int bestId = 0;
+            LastDirtyOutOfReach = 0;
             foreach (var a in Appls)
             {
-                if (a.IsSink || a.IsBin || !a.HasHolder) continue;
-                if (a.IsProvider && a.Prov.ProvidedItem != 0 && dirtyIds.Contains(a.Prov.ProvidedItem) && a.Prov.HasAvailableItems() && Reachable(a)) { id = a.Prov.ProvidedItem; return a.E; }
-                if (a.HeldId != 0 && dirtyIds.Contains(a.HeldId) && Reachable(a)) { id = a.HeldId; return a.E; }
-                if (a.HasStorage && EntityManager.HasComponent<CItemStored>(a.E))
+                if (a.IsSink || a.IsBin) continue;
+                if (!a.HasHolder && !a.IsDirtyStack) continue;
+                if (!includeRacks && IsRackAppl(a)) continue;
+
+                int found = 0;
+                if (a.IsProvider && a.Prov.ProvidedItem != 0 && a.Prov.Available > 0 && dirtyIds.Contains(a.Prov.ProvidedItem)) found = a.Prov.ProvidedItem;
+                else if (a.HeldId != 0 && dirtyIds.Contains(a.HeldId)) found = a.HeldId;
+                else if (a.HasStorage && EntityManager.HasComponent<CItemStored>(a.E))
                 {
                     var buf = EntityManager.GetBuffer<CItemStored>(a.E);
-                    for (int i = 0; i < buf.Length; i++)
+                    for (int i = 0; i < buf.Length && found == 0; i++)
                     {
                         var it = buf[i].StoredItem;
                         if (it != Entity.Null && EntityManager.Exists(it) && EntityManager.HasComponent<CItem>(it))
                         {
                             int cid = EntityManager.GetComponentData<CItem>(it).ID;
-                            if (dirtyIds.Contains(cid) && Reachable(a)) { id = cid; return a.E; }
+                            if (dirtyIds.Contains(cid)) found = cid;
                         }
                     }
                 }
+                if (found == 0) continue;
+                if (!Reachable(a)) { LastDirtyOutOfReach++; continue; }
+                float d = (a.Pos - MyPos).sqrMagnitude;
+                if (d < bd) { bd = d; best = a.E; bestId = found; }
             }
-            return Entity.Null;
+            id = bestId;
+            return best;
         }
     }
 }

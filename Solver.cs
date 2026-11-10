@@ -126,6 +126,13 @@ namespace ChefBot
                             if (cc < INF) Try(id, new Opt { Kind = NK.Split, Cost = cc + 2, Parent = par });
                         }
 
+                    if (depletedOf.TryGetValue(id, out var dparents))
+                        foreach (var dpar in dparents)
+                        {
+                            float cc = C(dpar.ID);
+                            if (cc < INF) Try(id, new Opt { Kind = NK.Depleted, Cost = cc + 4, Parent = dpar });
+                        }
+
                     if (item is ItemGroup g)
                     {
                         float total = 2; bool any = false, ok = true;
@@ -204,6 +211,12 @@ namespace ChefBot
                     var child = Build(o.Parent.ID, false, depth + 1);
                     if (child == null) return null;
                     return new Node { Kind = NK.Split, Item = x, Child = child, Cost = child.Cost + 2 };
+                }
+                case NK.Depleted:
+                {
+                    var child = Build(o.Parent.ID, false, depth + 1);
+                    if (child == null) return null;
+                    return new Node { Kind = NK.Depleted, Item = x, Child = child, Aux = o.Parent.SplitSubItem.ID, Cost = child.Cost + 4 };
                 }
                 case NK.Compose:
                     if (o.IsSlice)

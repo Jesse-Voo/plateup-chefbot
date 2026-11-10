@@ -36,6 +36,14 @@ You can run as many bots as the restaurant has free player slots (see `max_playe
 
 - **Recipe planner** built from the game data: fetching, chopping, kneading, cooking, merging into groups in an order the game accepts, slicing portions off bigger items (pizza, oil).
 - **Stock list with toppings:** "keep 2 plain pizzas and 1 with mushrooms ready". Plain and topped items are tracked separately, so a plain order is never served a topped pizza.
+- **Per-bot recipes:** give each bot its own stock list, for example one cook that makes mushroom pizza and one that makes plain.
+- **Names and looks:** name your bots; each gets a colour, hat and outfit that match its job (cook, server, dishwasher). The names show in the player bar.
+- **Dish rack:** the dishwasher puts dirty plates on the Dirty Plate Stack (or a rack / soaking sink) first, then collects the clean plates.
+- **Sharp Knife:** one cook picks up the Sharp Knife from a Sharp Knife Provider (chopping 3x faster) each day (`use_knife`). Choose who gets it per bot with `knife=high | normal | off` (or the Knife button in the F1 panel).
+- **Bins:** rubbish such as corn husks is thrown into a bin with room; a full bin is emptied into the outside bin first (`empty_bins`).
+- **Sides:** servers add a customer's side order (corn on the cob, onion rings ...) to the plate, and cooks keep side dishes in stock (`serve_sides`, `make_sides`).
+- **Mopping:** a dishwasher with nothing to wash picks up a mop from a Mop Bucket and cleans the floors, and puts it down as soon as there are plates again (`mop_floors`).
+- **Trays:** if you have a Tray Stand, the dishwasher picks up a tray and carries two dirty plates per trip (`use_tray` in the config).
 - **Counter marking:** choose which counters finished products go on (per product) and which are the bots' working counters.
 - **In-game map (F1):** a top-down view of your kitchen where you click counters, edit the stock list and manage the bots.
 - **Oven handling:** switches the oven on, waits for the result, switches it off, then takes the food out.
@@ -64,15 +72,32 @@ On the map, left-click a counter to cycle it (output, stash, off) and right-clic
 Settings live in `%USERPROFILE%\AppData\LocalLow\It's Happening\PlateUp\ChefBot\config.txt`. The map window edits the same file.
 
 ```text
-# one line per bot
-bot cook
-bot server
+# shared stock list, in priority order (empty everywhere = the bots decide)
+make Pizza - Cooked x2
+make Steak - Medium x2
+
+# the bots: a name is optional, and 'make' lines right below a bot are THAT bot's own recipes
+bot cook "Mushroom Chef" knife=high
+  make Pizza - Cooked with Mushroom - Chopped x1
+bot cook "Plain Chef"
+  make Pizza - Cooked x2
+bot server "Sam"
 bot dishwasher
 
-# what to keep stocked, in priority order (empty = the bots decide)
-make Pizza - Cooked x2
-make Pizza - Cooked with Mushroom - Chopped x1
-make Steak - Medium x2
+# the dishwasher puts dirty plates in appliances with these words in their name first
+dish_rack_names = Rack, Soak
+
+# the dishwasher uses a tray from a Tray Stand to carry two plates at once
+use_tray = true
+
+# cooks use the Sharp Knife; servers/cooks handle side dishes
+mop_floors = true
+use_knife = true
+serve_sides = true
+make_sides = true
+
+# optional: pick the hat and outfit for a job (names are listed in cosmetics.txt)
+outfit cook : Chef Hat , Chef Jacket
 
 # where things go (set with F5 / F6 or on the map)
 output * : 5,2 5,3
@@ -83,7 +108,7 @@ max_players = 8                  # the game's own limit is 4; 4-16 allowed
 bots_count_as_players = false    # false = only real players raise the customers per day
 ```
 
-Item names are the game's own names: see `cookbook.txt` and `gamedata.txt`, which are written next to the config on every start.
+Item names are the game's own names: see `cookbook.txt` and `gamedata.txt`, and `cosmetics.txt` for hats and outfits. They are written next to the config on every start.
 
 ## Install
 
@@ -122,7 +147,7 @@ Built and tested by watching it in one restaurant (pizza kitchen, game version 1
 
 **Tested:** joining as a player, pathfinding, ready-up, the whole pizza chain (dough, oil, sauce, cheese, bake, stop the oven, take it out, stock it) and cooking steak.
 
-**Not tested, so expect rough edges:** the Server and Dishwasher roles, running more than one bot at once, the F1 map, topping variants (for example mushroom pizza), the raised player limit, bots being ignored in the customer count, and hosting a networked session.
+**Not tested, so expect rough edges:** the Server and Dishwasher roles, the dish rack, the tray, mopping, the sharp knife, sides (and husking corn), bot names and outfits, per-bot recipes, running more than one bot at once, the F1 map, topping variants (for example mushroom pizza), the raised player limit, bots being ignored in the customer count, and hosting a networked session.
 
 **Known gaps (dishes it cannot plan yet):** stir-fry, the pasta dishes (spaghetti bolognese, pomodoro, white sauce), pumpkin soup and pie, corn on the cob, oysters, tea and birthday cake. They cook in a wok or pot and are portioned out of it, or use ingredients that come from garden plants, and the mod does not model that yet.
 

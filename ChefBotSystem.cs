@@ -58,11 +58,13 @@ namespace ChefBot
                 dumped = true;
                 try { Dump.GameDataDump(); } catch (Exception e) { Debug.LogError("[ChefBot] dump failed " + e); }
                 try { WriteCookbook(); } catch (Exception e) { Debug.LogError("[ChefBot] cookbook failed " + e); }
+                try { WriteCosmetics(); } catch (Exception e) { Debug.LogError("[ChefBot] cosmetics dump failed " + e); }
                 try { LoadConfig(); } catch (Exception e) { Debug.LogError("[ChefBot] config failed " + e); }
             }
 
             UpdateHud();
             DrainUiQueue();
+            FlushConfig();
             try { PlayerRules(); } catch (Exception e) { if (Now - lastClientWarn > 30f) { lastClientWarn = Now; Log("player rules: " + e.Message); } }
             var kb = Keyboard.current;
             if (kb != null)
@@ -93,7 +95,7 @@ namespace ChefBot
                     {
                         try { return TileManager.CanReach(x, y); } catch { return true; }
                     };
-                if (Now - navBuiltAt > 1.0f) { nav.Rebuild(Tiles, p => TileManager.GetOccupant(p) != Entity.Null); navBuiltAt = Now; }
+                if (Now - navBuiltAt > 1.0f) { nav.Rebuild(Tiles, p => IsBlockingOccupant(p)); navBuiltAt = Now; }
             }
 
             foreach (var a in agents.ToList())
@@ -152,6 +154,7 @@ namespace ChefBot
 
             Me = bot;
             TagAsBot(bot);
+            TryApplyAppearance(a);
             bool night = HasSingleton<SIsNightTime>();
             if (night)
             {
@@ -207,7 +210,7 @@ namespace ChefBot
         }
 
         // ---------- world queries ----------
-        public Vector3 MyPos => EntityManager.GetComponentData<CPosition>(Me).Position;
+        public Vector3 MyPos { get { return (Me != Entity.Null && EntityManager.Exists(Me) && EntityManager.HasComponent<CPosition>(Me)) ? EntityManager.GetComponentData<CPosition>(Me).Position : Vector3.zero; } }
 
         public Entity MyHeld()
         {

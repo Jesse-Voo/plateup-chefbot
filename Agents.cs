@@ -15,7 +15,10 @@ namespace ChefBot
     {
         public int Index;
         public int UserId;
-        public BotRole Role;
+        public BotSpec Spec = new BotSpec();
+        public BotRole Role { get { return Spec.Role; } set { Spec.Role = value; } }
+        public bool AppearanceApplied;
+        public string DisplayName { get { return string.IsNullOrWhiteSpace(Spec.Name) ? RoleLabel(Spec.Role) + " " + (Index + 1) : Spec.Name.Trim(); } }
         public Body Body = new Body();
         public IEnumerator<int> Brain;
         public Entity Me;
@@ -27,7 +30,7 @@ namespace ChefBot
         public float JoinStart;
         public int Errors;
         public bool RemoveMe;
-        public string Name => "Bot " + (Index + 1) + " (" + RoleLabel(Role) + ")";
+        public string Name => DisplayName + " (" + RoleLabel(Role) + ")";
 
         public static string RoleLabel(BotRole r)
         {
@@ -83,9 +86,11 @@ namespace ChefBot
             cur = null;
         }
 
-        BotAgent NewAgent(BotRole role)
+        BotAgent NewAgent(BotRole role) { return NewAgent(new BotSpec { Role = role }); }
+
+        BotAgent NewAgent(BotSpec spec)
         {
-            var a = new BotAgent { Index = agentCounter, UserId = BotUserId + (agentCounter % 60), Role = role, JoinStart = Now };
+            var a = new BotAgent { Index = agentCounter, UserId = BotUserId + (agentCounter % 60), Spec = spec, JoinStart = Now };
             agentCounter++;
             agents.Add(a);
             return a;
@@ -97,13 +102,13 @@ namespace ChefBot
             if (enabled) return;
             agents.Clear();
             agentCounter = 0;
-            var roles = cfg.Bots.Count > 0 ? cfg.Bots : new List<BotRole> { BotRole.Cook };
-            foreach (var r in roles) NewAgent(r);
+            var specs = cfg.Bots.Count > 0 ? cfg.Bots : new List<BotSpec> { new BotSpec() };
+            foreach (var sp in specs) NewAgent(sp);
         }
 
         void SyncBotsToCfg()
         {
-            cfg.Bots = agents.Select(a => a.Role).ToList();
+            cfg.Bots = agents.Select(a => a.Spec).ToList();
             try { cfg.Save(); } catch { }
         }
 
@@ -114,7 +119,7 @@ namespace ChefBot
             if (!on) return;
             if (agents.Count == 0) BuildAgentsFromConfig();
             if (agents.Count == 0) NewAgent(BotRole.Cook);
-            foreach (var a in agents) { a.JoinStart = Now; a.Errors = 0; a.ReadyPressed = false; a.ReadyHold = 0; a.RemoveMe = false; }
+            foreach (var a in agents) { a.JoinStart = Now; a.Errors = 0; a.ReadyPressed = false; a.ReadyHold = 0; a.RemoveMe = false; a.AppearanceApplied = false; }
             try { Dump.KitchenDump(EntityManager); } catch (Exception e) { Log("dump failed " + e.Message); }
         }
 
@@ -163,10 +168,37 @@ namespace ChefBot
             {
                 if (i < 0 || i >= agents.Count) return;
                 var a = agents[i];
-                a.Role = role; a.Brain = null;          // start its new task loop from scratch
+                a.Role = role; a.Brain = null; a.AppearanceApplied = false;     // new job: new task loop and new look
                 SyncBotsToCfg();
             });
         }
+
+        bool cfgDirty; float cfgSavedAt;
+        void SaveSoon() { cfgDirty = true; }
+        void FlushConfig()
+        {
+            if (!cfgDirty || Now - cfgSavedAt < 1f) return;
+            cfgSavedAt = Now; cfgDirty = false;
+            try { cfg.Save(); } catch { }
+        }
+
+        public void UiRename(int i, string name)
+        {
+            if (i < 0 || i >= agents.Count) return;
+            agents[i].Spec.Name = name ?? "";
+            agents[i].AppearanceApplied = false;       // show the new name in the game
+            SaveSoon();
+        }
+
+        public void UiCycleKnife(int i)
+        {
+            if (i < 0 || i >= agents.Count) return;
+            var sp = agents[i].Spec;
+            sp.Knife = sp.Knife == 1 ? 2 : sp.Knife == 2 ? 0 : 1;       // normal -> high -> off -> normal
+            SaveSoon();
+        }
+
+        public void UiSelectList(int bot) { MapData.SelectedBot = bot; MapData.SelectedEntry = -1; mapAt = 0; }
 
         public void UiRemoveBot(int i)
         {
@@ -195,7 +227,7 @@ namespace ChefBot
         static bool NeedsCooking(Node n)
         {
             if (n == null) return false;
-            if (n.Kind == NK.Process) return true;
+            if (n.Kind == NK.Process || n.Kind == NK.Depleted) return true;
             if (NeedsCooking(n.Child)) return true;
             foreach (var p in n.Parts) if (NeedsCooking(p)) return true;
             return false;
