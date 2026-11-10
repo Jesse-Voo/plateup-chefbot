@@ -30,7 +30,7 @@ It does not have recipes hard-coded. At start-up it reads every item, process an
 | **Dishwasher** | Collects dirty plates, washes them, restocks clean plates. |
 | **All-rounder** | Does all three (meant to be used alone). |
 
-You can run up to three bots next to you (PlateUp! holds four players).
+You can run as many bots as the restaurant has free player slots (see `max_players` below).
 
 ### Features
 
@@ -40,6 +40,8 @@ You can run up to three bots next to you (PlateUp! holds four players).
 - **In-game map (F1):** a top-down view of your kitchen where you click counters, edit the stock list and manage the bots.
 - **Oven handling:** switches the oven on, waits for the result, switches it off, then takes the food out.
 - **Works with any layout:** pathfinding uses the game's own reachability rules.
+- **More than 4 players:** the game's player limit is raised (default 8, up to 16), for friends and bots alike.
+- **Bots don't make the restaurant harder:** they are ignored when the game scales customers per day (and money, queue patience and fire spread) by player count, so only real players count.
 
 ## Controls
 
@@ -75,11 +77,21 @@ make Steak - Medium x2
 # where things go (set with F5 / F6 or on the map)
 output * : 5,2 5,3
 stash : 9,4
+
+# players
+max_players = 8                  # the game's own limit is 4; 4-16 allowed
+bots_count_as_players = false    # false = only real players raise the customers per day
 ```
 
 Item names are the game's own names: see `cookbook.txt` and `gamedata.txt`, which are written next to the config on every start.
 
 ## Install
+
+### From a release
+
+Download `ChefBot-*.zip` from the [Releases](https://github.com/Jesse-Voo/plateup-chefbot/releases) page and extract it into your PlateUp! folder so you end up with `PlateUp\Mods\ChefBot\ChefBot.dll` (for a Steam install: `...\steamapps\common\PlateUp\PlateUp\Mods`).
+
+### From source
 
 You need the game, the [.NET SDK](https://dotnet.microsoft.com/download) and a Windows PC.
 
@@ -110,11 +122,11 @@ Built and tested by watching it in one restaurant (pizza kitchen, game version 1
 
 **Tested:** joining as a player, pathfinding, ready-up, the whole pizza chain (dough, oil, sauce, cheese, bake, stop the oven, take it out, stock it) and cooking steak.
 
-**Not tested, so expect rough edges:** the Server and Dishwasher roles, running more than one bot at once, the F1 map, topping variants (for example mushroom pizza), and hosting a networked session.
+**Not tested, so expect rough edges:** the Server and Dishwasher roles, running more than one bot at once, the F1 map, topping variants (for example mushroom pizza), the raised player limit, bots being ignored in the customer count, and hosting a networked session.
 
 **Known gaps (dishes it cannot plan yet):** stir-fry, the pasta dishes (spaghetti bolognese, pomodoro, white sauce), pumpkin soup and pie, corn on the cob, oysters, tea and birthday cake. They cook in a wok or pot and are portioned out of it, or use ingredients that come from garden plants, and the mod does not model that yet.
 
-**Multiplayer:** the host's PC runs the whole kitchen, so the bots only work on the **host's** PC. A client cannot run them.
+**Multiplayer:** the host's PC runs the whole kitchen, so the bots only work on the **host's** PC. A client cannot run them. The raised player limit applies to the game's own player manager; an online lobby may still have its own cap.
 
 ## Disclaimer
 

@@ -148,7 +148,8 @@ namespace ChefBot
         {
             uiQueue.Enqueue(() =>
             {
-                if (agents.Count >= 3) { Status = "A restaurant holds 4 players: at most 3 bots next to you."; Log(Status); return; }
+                int cap = Mathf.Max(1, Mathf.Clamp(cfg.MaxPlayers, 4, 16) - 1);
+                if (agents.Count >= cap) { Status = "The restaurant holds " + (cap + 1) + " players (max_players in config.txt): at most " + cap + " bots next to you."; Log(Status); return; }
                 var a = NewAgent(role);
                 a.JoinStart = Now;
                 SyncBotsToCfg();

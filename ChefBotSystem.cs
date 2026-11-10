@@ -63,6 +63,7 @@ namespace ChefBot
 
             UpdateHud();
             DrainUiQueue();
+            try { PlayerRules(); } catch (Exception e) { if (Now - lastClientWarn > 30f) { lastClientWarn = Now; Log("player rules: " + e.Message); } }
             var kb = Keyboard.current;
             if (kb != null)
             {
@@ -150,6 +151,7 @@ namespace ChefBot
             }
 
             Me = bot;
+            TagAsBot(bot);
             bool night = HasSingleton<SIsNightTime>();
             if (night)
             {

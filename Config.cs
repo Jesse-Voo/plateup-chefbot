@@ -25,6 +25,8 @@ namespace ChefBot
     public class ChefConfig
     {
         public bool CookOnly = true;
+        public int MaxPlayers = 8;                 // game default is 4
+        public bool BotsCountAsPlayers = false;    // false: bots do not raise customers per day / difficulty
         public List<BotRole> Bots = new List<BotRole> { BotRole.Cook };
         bool botsParsed;
         public bool OutputFallback = false;   // when every marked output counter is full: false = wait, true = use any free counter
@@ -109,6 +111,13 @@ namespace ChefBot
                         cfg.Bots.Add(role);
                         continue;
                     }
+                    if (line.StartsWith("max_players", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string v = line.Substring(line.IndexOf('=') + 1).Trim();
+                        if (int.TryParse(v, out int mp)) cfg.MaxPlayers = Mathf.Clamp(mp, 4, 16);
+                        continue;
+                    }
+                    if (line.StartsWith("bots_count_as_players", StringComparison.OrdinalIgnoreCase)) { cfg.BotsCountAsPlayers = line.EndsWith("true", StringComparison.OrdinalIgnoreCase); continue; }
                     if (line.StartsWith("output_fallback", StringComparison.OrdinalIgnoreCase)) { cfg.OutputFallback = line.EndsWith("true", StringComparison.OrdinalIgnoreCase); continue; }
 
                     if (line.StartsWith("make ", StringComparison.OrdinalIgnoreCase))
@@ -178,6 +187,12 @@ namespace ChefBot
             sb.AppendLine("# output_fallback = false : if all counters you marked as OUTPUT are full the bot waits;");
             sb.AppendLine("#                    true : it uses any free counter instead.");
             sb.AppendLine("output_fallback = " + (OutputFallback ? "true" : "false"));
+            sb.AppendLine();
+            sb.AppendLine("# max_players : how many players (you + friends + bots) a restaurant holds. The game's own limit is 4; 4-16 allowed.");
+            sb.AppendLine("max_players = " + MaxPlayers);
+            sb.AppendLine("# bots_count_as_players = false : bots do NOT raise the number of customers per day (or the other");
+            sb.AppendLine("#   player-count difficulty scaling). Only real players count. true = the game counts bots as players.");
+            sb.AppendLine("bots_count_as_players = " + (BotsCountAsPlayers ? "true" : "false"));
             sb.AppendLine();
             sb.AppendLine("# WHAT TO KEEP STOCKED, in priority order (top = most important). Empty list = the bot decides by itself.");
             sb.AppendLine("# Format:   make <item name> [with <topping>, <topping>] [x<how many>]");
